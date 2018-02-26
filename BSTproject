@@ -1,0 +1,154 @@
+package BSTproject
+
+import org.apache.spark._
+
+import org.apache.spark.SparkContext._
+import org.apache.log4j._
+import java.lang.Double._
+import scala.util.parsing.json._
+import org.apache.spark.ml.classification.LogisticRegression
+import org.apache.spark.ml.regression.LinearRegression
+import org.apache.spark.ml.classification.{BinaryLogisticRegressionSummary, LogisticRegression}
+import org.apache.spark.ml.feature.VectorAssembler
+import org.apache.spark.ml.linalg.Vectors
+import org.apache.spark.ml.{Pipeline, PipelineModel}
+import org.apache.spark.ml.feature.{OneHotEncoder, StringIndexer}
+import org.apache.spark.ml.feature.VectorIndexer
+import org.apache.spark.mllib.util.MLUtils
+import org.apache.spark.sql.functions._
+/** Compute the average number of friends by age in a social network. */
+object Main {
+  
+  /** Our main function where the action happens */
+  def main(args: Array[String]) {
+    
+    Logger.getLogger("org").setLevel(Level.OFF)
+  
+    // Create a Spark context:
+    // --> local[*] specifies that we will run Spark locally with as many worker threads as logical cores on our machines
+    // --> BST is the name of the context
+    val sc = new SparkContext("local[*]", "BST")
+       
+    // Create a basic SQL context
+    // --> This will be the entry point into all functionality in Spark SQL
+    val sqlContext = new org.apache.spark.sql.SQLContext(sc)
+    val stationID = args(0)
+    val requestedTime = args(1)
+    
+    import sqlContext.implicits._
+    
+    val Input = Seq((requestedTime.toInt,stationID.toInt)).toDF("Time","station_id")
+    
+    // Read and parse the Bixi data directly from the JSON file and store it in a DataFrame
+    // --> Each team member has a copy of this data locally and should specify the file's path in a File.scala object
+    val df = sqlContext.read.json(File.jsonPath)
+    
+    df.schema
+    df.createOrReplaceTempView("records")
+   
+    //val query = sqlContext.sql("SELECT CAST(from_unixtime(latestUpdateTime,'hh') AS INT) as Hour,CAST(from_unixtime(latestUpdateTime,'mm') AS INT) as Minute,CAST(from_unixtime(latestUpdateTime,'ss') AS INT) as Second, station_id,CASE WHEN nbEmptyDocks != 0 THEN 0 ELSE 1 END AS Full FROM records WHERE latestUpdateTime IS NOT NULL")
+//    val query = sqlContext.sql("SELECT from_unixtime(latestUpdateTime,'yyyy-MM-dd hh:mm:ss') as DateTime, station_id,CASE WHEN nbEmptyDocks != 0 THEN 0 ELSE 1 END AS Full FROM records WHERE latestUpdateTime IS NOT NULL AND station_id < 7000")
+    val query = sqlContext.sql("SELECT nbBikes,nbEmptyDocks,station_id,from_unixtime(latestUpdateTime,'yyyy-MM-dd hh:mm:ss') as DateTime,date_format(from_unixtime(latestUpdateTime),'EEEE') as DayOfWeek,from_unixtime(latestUpdateTime,'MM') as Month, from_unixtime(latestUpdateTime,'dd') as date, from_unixtime(latestUpdateTime,'yyyy') - 2015 as yearNumber, from_unixtime(latestUpdateTime,'hh') as hour FROM records WHERE station_id = 1 OR station_id = 7055")
+//    query.show(1000,false)
+    query.createOrReplaceTempView("records")
+    val query2 = sqlContext.sql("SELECT nbBikes/(nbBikes+nbEmptyDocks) as percentageFull,nbBikes,nbEmptyDocks,station_id,DayOfWeek,Month,date,yearNumber,hour FROM records WHERE hour = 9")
+//    query2.show(100,false)
+    query2.createOrReplaceTempView("records")
+    val query3 = sqlContext.sql("SELECT AVG(percentageFull) as averagePercentageFull,Month,date,yearNumber,DayOfWeek,hour FROM records GROUP BY Month,date,yearNumber,hour,DayOfWeek ORDER BY yearNumber,Month,date")
+    query3.show(1500,false)
+    
+//    val grouped = query.groupBy("Time","station_id").agg(avg("Full"))
+//    grouped.show()
+    //categorize Month
+    val Mindexer = new StringIndexer()
+      .setInputCol("Month")
+      .setOutputCol("MonthIndex")
+      .fit(query3)
+    val Mindexed = Mindexer.transform(query3)
+    //Mindexed.show(100)
+    val Mencoder = new OneHotEncoder().setInputCol("MonthIndex").setOutputCol("MonthVec")
+    val Mencoded = Mencoder.transform(Mindexed)
+    //Mencoded.show(100)
+    
+    //categorize date
+    val Dindexer = new StringIndexer()
+      .setInputCol("date")
+      .setOutputCol("DateIndex")
+      .fit(Mencoded)
+    val Dindexed = Dindexer.transform(Mencoded)
+    //Dindexed.show(100)
+    val Dencoder = new OneHotEncoder().setInputCol("DateIndex").setOutputCol("DateVec")
+    val Dencoded = Dencoder.transform(Dindexed)
+    Dencoded.show(100)
+    
+    //categorize DayofWeek
+    val dayWeekindexer = new StringIndexer()
+      .setInputCol("DayOfWeek")
+      .setOutputCol("DayWeekIndex")
+      .fit(Dencoded)
+    val dayWeekindexed = dayWeekindexer.transform(Dencoded)
+    //Dindexed.show(100)
+    val DayWeekencoder = new OneHotEncoder().setInputCol("DayWeekIndex").setOutputCol("DayWeekVec")
+    val DayWeekencoded = DayWeekencoder.transform(dayWeekindexed)
+    DayWeekencoded.show(100)
+    //categorize Time in terms of hour
+//    val hourIndexer = new StringIndexer()
+//      .setInputCol("Time")
+//      .setOutputCol("timeIndex")
+//      .fit(encoded)
+//    val hourIndexed = hourIndexer.transform(encoded)
+//    hourIndexed.show(100)
+//    val HourEncoder = new OneHotEncoder().setInputCol("timeIndex").setOutputCol("timeVec")
+//    val FinalEncoded = HourEncoder.transform(hourIndexed)
+//    
+    //Assemble Features
+//    val assembler = new VectorAssembler()
+//                    .setInputCols(Array("MonthVec","DayWeekVec","DateVec","yearNumber"))
+//                    .setOutputCol("features")
+   val assembler = new VectorAssembler()
+                    .setInputCols(Array("DayWeekVec"))
+                    .setOutputCol("features")
+   val dataset = assembler.transform(DayWeekencoded)  
+//   print("show dataset\n")
+   dataset.show()
+   
+   val lr = new LinearRegression()
+                .setMaxIter(10)
+                .setRegParam(0.3)
+                .setElasticNetParam(0.8)
+                .setLabelCol("averagePercentageFull")
+                .setFeaturesCol("features")
+                
+   val Array(testing, training) = dataset.randomSplit(Array(0.4,0.6))
+   
+   val model = lr.fit(training)
+   
+   val trainingSummary = model.summary
+   
+   println(s"RMSE: ${trainingSummary.rootMeanSquaredError}")
+    
+   val prediction = model.transform(testing)
+   
+   prediction.show()
+//   val lr = new LogisticRegression()
+//      .setMaxIter(10)
+//      .setRegParam(0.3)
+//      .setElasticNetParam(0.8)
+//      .setFeaturesCol("features")   // setting features column
+//      .setLabelCol("Full")       // setting label column
+//
+//// Fit the model
+//  //  val pipeline = new Pipeline().setStages(Array(assembler,lr))
+//
+////fitting the model
+//    val lrModel = lr.fit(training)
+//    val trainingSummary = lrModel.summary
+//    val objectiveHistory = trainingSummary.objectiveHistory
+//    println("objectiveHistory:")
+//    val prediction = lrModel.transform(testing)
+//    val predictionDis = prediction.distinct()
+//    predictionDis.show()
+//    predictionDis.select("probability").distinct().show()
+  } 
+}
+  
